@@ -9,7 +9,7 @@
 [![ASE](https://img.shields.io/badge/deps-ase%20%7C%20spglib%20%7C%20seekpath-orange.svg)](requirements.txt)
 [![VASP](https://img.shields.io/badge/output-VASP%20KPOINTS-9cf.svg)](https://www.vasp.at/)
 
-[功能](#-功能特性) · [安装](#-安装) · [快速开始](#-快速开始) · [典型示例](#-典型示例) · [原理](#-工作原理) · [API](#-作为模块调用)
+[功能](#-功能特性) · [安装](#-安装) · [快速开始](#-快速开始) · [典型示例](#-典型示例) · [原理](#-工作原理) · [API](#-作为模块调用) · [LLM 工具](#-作为-llm-工具调用)
 
 </div>
 
@@ -80,6 +80,7 @@ python kpoint.py POSCAR -m lines > KPOINTS
 | `--backend` | 能带后端 `auto` / `ase` / `seekpath` | `auto` |
 | `--print-axis` | 打印高对称点横轴坐标到 stderr | — |
 | `--axis-file FILE` | 把横轴坐标写入文件 | — |
+| `--json` | 以 JSON 输出结果（供 LLM/程序调用） | — |
 | `--print-only` | 只打印，不写文件 | — |
 | `-q, --quiet` | 不打印摘要 | — |
 
@@ -288,6 +289,77 @@ print(path["backend"], path["lattice"], path["labels"])
 for label, x in path["axis"]:
     print(label, x)
 ```
+
+## 🤖 作为 LLM 工具调用
+
+本工具可直接被 LLM（OpenAI / Anthropic 等）作为 function/tool 调用，仓库提供：
+
+| 文件 | 说明 |
+| --- | --- |
+| [`tool_schema.json`](tool_schema.json) | OpenAI function-calling 格式的工具定义 |
+| [`tool_schema.anthropic.json`](tool_schema.anthropic.json) | Anthropic tool 格式（`input_schema`） |
+| [`llm_tool.py`](llm_tool.py) | Python 包装函数 `generate_kpoints(...)`，返回结构化 dict |
+
+### 工具 schema（节选）
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "generate_kpoints",
+    "description": "根据 POSCAR 生成 VASP KPOINTS ...",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "poscar_filepath": { "type": "string", "description": "POSCAR 路径" },
+        "mode": { "type": "string", "enum": ["mesh", "lines"], "default": "mesh" },
+        "structure_type": { "type": "string", "enum": ["auto", "mole", "slab", "bulk"], "default": "auto" },
+        "threshold": { "type": "number", "default": 0.04 },
+        "vacuum_threshold": { "type": "number", "default": 5.0 },
+        "per_seg": { "type": "integer", "default": 20 },
+        "backend": { "type": "string", "enum": ["auto", "ase", "seekpath"], "default": "auto" },
+        "output_path": { "type": "string", "default": "KPOINTS" }
+      },
+      "required": ["poscar_filepath"]
+    }
+  }
+}
+```
+
+### 调用与返回
+
+`kpoint.py --json` 输出结构化结果；`llm_tool.generate_kpoints(...)` 直接返回该 dict：
+
+```python
+from llm_tool import generate_kpoints
+
+res = generate_kpoints("POSCAR", mode="lines", output_path="-")
+print(res["backend"], res["lattice"], res["labels"])   # ase HEX2D Γ-M-K
+for p in res["axis"]:
+    print(p["label"], p["x"])                          # 能带图 xticks
+print(res["kpoints"])                                  # KPOINTS 正文
+```
+
+返回结构：
+
+```json
+{
+  "status": "ok",
+  "mode": "lines",
+  "structure_type": "slab",
+  "detected": true,
+  "out_file": null,
+  "mesh": null,
+  "lattice": "HEX2D",
+  "backend": "ase",
+  "labels": "Γ-M-K",
+  "axis": [{"label": "Γ", "x": 0.0}, {"label": "M", "x": 1.3087}],
+  "warnings": [],
+  "kpoints": "k-points along high symmetry path\n20\nline mode\n..."
+}
+```
+
+> 在 pi 等 agent 中，可把 `tool_schema.json` 的 `parameters` 作为该工具的参数 schema，执行时运行 `python kpoint.py ... --json` 并解析 stdout 即可。
 
 ## 📄 许可
 

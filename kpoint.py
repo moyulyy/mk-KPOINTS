@@ -23,6 +23,7 @@ K 点密度规则 (--threshold, 默认 0.04):
   from kpoint import create_vasp_kpoints, compute_kpoint_mesh, detect_structure_type
 """
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -297,8 +298,10 @@ def build_band_path(atoms, structure_type="auto", vacuum_threshold=None,
     """
     if structure_type and structure_type != "auto":
         stype = structure_type
+        detected = False
     else:
         stype, _ = detect_structure_type(atoms, vacuum_threshold)
+        detected = True
     if stype == "mole":
         raise ValueError("分子体系无周期性, 无法生成能带路径, 请改用 mesh 模式。")
 
@@ -321,6 +324,8 @@ def build_band_path(atoms, structure_type="auto", vacuum_threshold=None,
                 warnings.append(
                     "未安装 seekpath, bulk 已回退 ASE; 建议 pip install seekpath。")
             result = _path_ase(atoms, "bulk")
+    result["structure_type"] = stype
+    result["detected"] = detected
     result["warnings"] = warnings + list(result.get("warnings") or [])
     return result
 
@@ -401,6 +406,8 @@ def generate_kpoints(
     if mode == "lines":
         path = build_band_path(atoms, structure_type, vacuum_threshold, backend)
         content = format_band_kpoints(path["segments"], path["labels"], per_seg)
+        info["structure_type"] = path.get("structure_type", structure_type)
+        info["detected"] = bool(path.get("detected"))
         info["labels"] = band_path_summary(path["labels"])
         info["lattice"] = path["lattice"]
         info["backend"] = path["backend"]
@@ -523,6 +530,10 @@ def build_parser():
         help="把高对称点横轴坐标写入文件",
     )
     parser.add_argument(
+        "--json", action="store_true",
+        help="以 JSON 输出结果 (供 LLM/程序调用; 含 KPOINTS 正文与元数据)",
+    )
+    parser.add_argument(
         "--print-only", action="store_true",
         help="只打印结果, 不写文件",
     )
@@ -531,15 +542,41 @@ def build_parser():
     return parser
 
 
+def _json_payload(content, info, args, output, write):
+    """构造供 LLM / 程序调用的结构化结果。"""
+    return {
+        "status": "ok",
+        "mode": args.mode,
+        "structure_type": info.get("structure_type"),
+        "detected": bool(info.get("detected")),
+        "out_file": output if write else None,
+        "mesh": list(info["mesh"]) if info.get("mesh") else None,
+        "lattice": info.get("lattice"),
+        "backend": info.get("backend"),
+        "labels": info.get("labels"),
+        "axis": [{"label": display_label(l), "x": x} for l, x in (info.get("axis") or [])],
+        "warnings": info.get("warnings") or [],
+        "kpoints": content,
+    }
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    def fail(msg, code=1):
+        if args.json:
+            print(json.dumps({"status": "error", "error": msg},
+                             ensure_ascii=False, indent=2))
+        else:
+            print(f"[kpoint] 错误: {msg}", file=sys.stderr)
+        return code
+
     poscar = args.poscar_opt or args.poscar
     if not poscar:
-        parser.error("缺少 POSCAR 文件路径 (位置参数或 -i/--poscar-filepath)")
+        return fail("缺少 POSCAR 文件路径 (位置参数或 -i/--poscar-filepath)")
     if not os.path.isfile(poscar):
-        parser.error(f"POSCAR 文件不存在: {poscar}")
+        return fail(f"POSCAR 文件不存在: {poscar}")
 
     output = args.output
     write = not args.print_only and output != "-"
@@ -555,11 +592,10 @@ def main(argv=None):
             per_seg=args.per_seg,
             backend=args.backend,
             write=write,
-            verbose=not args.quiet,
+            verbose=not args.quiet and not args.json,
         )
     except (ValueError, OSError) as exc:
-        print(f"[kpoint] 错误: {exc}", file=sys.stderr)
-        return 1
+        return fail(str(exc))
 
     if args.mode == "lines" and (args.print_axis or args.axis_file):
         title = f"band x-axis  backend={info['backend']} lattice={info['lattice']}"
@@ -569,7 +605,11 @@ def main(argv=None):
         if args.axis_file:
             Path(args.axis_file).write_text(table + "\n", encoding="utf8")
 
-    print(content)
+    if args.json:
+        print(json.dumps(_json_payload(content, info, args, output, write),
+                         ensure_ascii=False, indent=2))
+    else:
+        print(content)
     return 0
 
 
